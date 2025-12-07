@@ -1,137 +1,120 @@
-// api/tiktok-webhook.js
-export default async function handler(req, res) {
+const crypto = require('crypto-js');
+
+module.exports = async (req, res) => {
+  // Set CORS headers
+  res.setHeader('Access-Control-Allow-Credentials', true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+  
+  // Handle preflight
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
     const shopifyEvent = req.body;
-    console.log('Shopify Webhook Received:', shopifyEvent.event);
-
+    console.log('Shopify Webhook Received:', shopifyEvent.event || 'unknown');
+    
     let tiktokEvent = null;
     let value = 0;
     let currency = 'USD';
+    let eventType = '';
 
-    // Process based on Shopify event type
-    switch (shopifyEvent.event) {
-      case 'carts/create':
-      case 'carts/update':
-        // Cart created/updated - for AddToCart
-        if (shopifyEvent.line_items && shopifyEvent.line_items.length > 0) {
-          value = shopifyEvent.line_items.reduce((sum, item) => {
-            return sum + (item.price * item.quantity);
-          }, 0) / 100; // Shopify stores in cents
-          currency = shopifyEvent.currency || 'USD';
-          
-          tiktokEvent = {
-            event: 'AddToCart',
-            event_id: `shopify_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            pixel_id: process.env.TIKTOK_PIXEL_ID,
-            value: value,
-            currency: currency,
-            contents: shopifyEvent.line_items.map(item => ({
-              content_id: item.product_id.toString(),
-              quantity: item.quantity,
-              price: (item.price / 100).toFixed(2)
-            }))
-          };
-        }
-        break;
+    // Helper function to hash for TikTok
+    const hashData = (data) => {
+      if (!data) return undefined;
+      return crypto.SHA256(data.toString().toLowerCase().trim()).toString(crypto.enc.Hex);
+    };
 
-      case 'checkouts/create':
-      case 'checkouts/update':
-        // Checkout created/updated - for InitiateCheckout
-        if (shopifyEvent.total_price) {
-          value = shopifyEvent.total_price / 100;
-          currency = shopifyEvent.currency || 'USD';
-          
-          tiktokEvent = {
-            event: 'InitiateCheckout',
-            event_id: `shopify_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            pixel_id: process.env.TIKTOK_PIXEL_ID,
-            value: value,
-            currency: currency,
-            contents: shopifyEvent.line_items?.map(item => ({
-              content_id: item.product_id.toString(),
-              quantity: item.quantity,
-              price: (item.price / 100).toFixed(2)
-            })) || []
-          };
-        }
-        break;
-
-      case 'orders/create':
-        // Order created - for Purchase
-        if (shopifyEvent.total_price) {
-          value = shopifyEvent.total_price / 100;
-          currency = shopifyEvent.currency || 'USD';
-          
-          tiktokEvent = {
-            event: 'Purchase',
-            event_id: `shopify_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            pixel_id: process.env.TIKTOK_PIXEL_ID,
-            value: value,
-            currency: currency,
-            contents: shopifyEvent.line_items?.map(item => ({
-              content_id: item.product_id.toString(),
-              quantity: item.quantity,
-              price: (item.price / 100).toFixed(2)
-            })) || []
-          };
-        }
-        break;
-    }
-
-    // Send to TikTok if we have an event
-    if (tiktokEvent) {
-      console.log('Sending to TikTok:', tiktokEvent.event, 'Value:', value);
+    // Process based on Shopify event
+    if (shopifyEvent.total_price) {
+      value = shopifyEvent.total_price / 100; // Shopify stores in cents
+      currency = shopifyEvent.currency || 'USD';
       
-      // TikTok Conversion API endpoint
-      const tiktokResponse = await fetch('https://business-api.tiktok.com/open_api/v1.3/pixel/track/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Token': process.env.TIKTOK_ACCESS_TOKEN
-        },
-        body: JSON.stringify({
-          pixel_code: process.env.TIKTOK_PIXEL_ID,
-          event: tiktokEvent.event,
-          event_id: tiktokEvent.event_id,
-          timestamp: new Date().toISOString(),
-          properties: {
-            value: tiktokEvent.value,
-            currency: tiktokEvent.currency,
-            contents: tiktokEvent.contents
-          },
-          context: {
-            ad: {
-              callback: shopifyEvent.customer?.email || ''
-            },
-            user: {
-              email: shopifyEvent.customer?.email ? hashEmail(shopifyEvent.customer.email) : undefined,
-              phone: shopifyEvent.customer?.phone ? hashPhone(shopifyEvent.customer.phone) : undefined
-            }
-          }
-        })
-      });
-
-      const result = await tiktokResponse.json();
-      console.log('TikTok API Response:', result);
+      if (shopifyEvent.event?.includes('order')) {
+        eventType = 'Purchase';
+      } else if (shopifyEvent.event?.includes('checkout')) {
+        eventType = 'InitiateCheckout';
+      } else if (shopifyEvent.event?.includes('cart')) {
+        eventType = 'AddToCart';
+      }
     }
 
-    res.status(200).json({ success: true });
+    // Only process if we have an event type and value
+    if (eventType && value > 0) {
+      console.log(`Sending to TikTok: ${eventType}, Value: ${value}, Currency: ${currency}`);
+      
+      // Prepare TikTok event
+      const eventId = `shopify_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const timestamp = new Date().toISOString().split('.')[0] + 'Z';
+      
+      const tiktokPayload = {
+        pixel_code: process.env.TIKTOK_PIXEL_ID,
+        event: eventType,
+        event_id: eventId,
+        timestamp: timestamp,
+        properties: {
+          value: value,
+          currency: currency,
+          contents: shopifyEvent.line_items?.map(item => ({
+            content_id: item.product_id?.toString(),
+            quantity: item.quantity,
+            price: (item.price / 100).toFixed(2)
+          })) || []
+        },
+        context: {
+          ip: shopifyEvent.client_details?.browser_ip,
+          user_agent: shopifyEvent.client_details?.user_agent,
+          user: {}
+        }
+      };
+
+      // Add hashed customer data if available
+      if (shopifyEvent.customer?.email) {
+        tiktokPayload.context.user.email = hashData(shopifyEvent.customer.email);
+      }
+      if (shopifyEvent.customer?.phone) {
+        tiktokPayload.context.user.phone = hashData(shopifyEvent.customer.phone);
+      }
+
+      // Send to TikTok API
+      try {
+        const tiktokResponse = await fetch('https://business-api.tiktok.com/open_api/v1.3/pixel/track/', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Token': process.env.TIKTOK_ACCESS_TOKEN
+          },
+          body: JSON.stringify(tiktokPayload)
+        });
+
+        const result = await tiktokResponse.json();
+        console.log('TikTok API Response:', JSON.stringify(result, null, 2));
+        
+        if (result.code !== 0) {
+          console.error('TikTok API Error:', result.message);
+        }
+      } catch (apiError) {
+        console.error('Failed to send to TikTok API:', apiError.message);
+      }
+    }
+
+    res.status(200).json({ 
+      success: true, 
+      event: eventType || 'no_event_processed',
+      value: value 
+    });
+    
   } catch (error) {
-    console.error('Webhook Error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Webhook Processing Error:', error);
+    res.status(500).json({ 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'production' ? undefined : error.stack
+    });
   }
-}
-
-// Helper functions for hashing (required by TikTok)
-function hashEmail(email) {
-  // Simple SHA256 hash - in production use crypto library
-  return btoa(email).replace(/=+$/, '');
-}
-
-function hashPhone(phone) {
-  return btoa(phone.replace(/\D/g, '')).replace(/=+$/, '');
-}
+};
