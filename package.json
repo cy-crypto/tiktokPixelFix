@@ -1,0 +1,15 @@
+{
+  "name": "tiktok-shopify-webhook",
+  "version": "1.0.0",
+  "description": "TikTok webhook proxy for Shopify",
+  "main": "api/tiktok-webhook.js",
+  "scripts": {
+    "start": "node api/tiktok-webhook.js"
+  },
+  "dependencies": {
+    "@vercel/node": "^2.0.0"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
